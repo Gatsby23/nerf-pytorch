@@ -1,29 +1,35 @@
+# 这里都是常规引入
 import os, sys
 import numpy as np
 import imageio
 import json
 import random
 import time
+# 引入torch相关的库
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+# 这里不知道引入的是什么
 from tqdm import tqdm, trange
-
+# 引入画图程序
 import matplotlib.pyplot as plt
-
+# 自己写的引入nerf助手
 from run_nerf_helpers import *
 
+# 这里看来是跟图形学的库更相关
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
 
-
+# 这里是使用设备GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
 
 
+# 这个应该是为了小批量训练创建的全连接层
+## 晚上需要去看下全连接层的代码
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
     """
@@ -33,7 +39,7 @@ def batchify(fn, chunk):
         return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
     return ret
 
-
+# 开始跑神经网络
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
@@ -65,33 +71,11 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
     return all_ret
 
-
+# 渲染方程
 def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
-    """Render rays
-    Args:
-      H: int. Height of image in pixels.
-      W: int. Width of image in pixels.
-      focal: float. Focal length of pinhole camera.
-      chunk: int. Maximum number of rays to process simultaneously. Used to
-        control maximum memory usage. Does not affect final results.
-      rays: array of shape [2, batch_size, 3]. Ray origin and direction for
-        each example in batch.
-      c2w: array of shape [3, 4]. Camera-to-world transformation matrix.
-      ndc: bool. If True, represent ray origin, direction in NDC coordinates.
-      near: float or array of shape [batch_size]. Nearest distance for a ray.
-      far: float or array of shape [batch_size]. Farthest distance for a ray.
-      use_viewdirs: bool. If True, use viewing direction of a point in space in model.
-      c2w_staticcam: array of shape [3, 4]. If not None, use this transformation matrix for 
-       camera while using other c2w argument for viewing directions.
-    Returns:
-      rgb_map: [batch_size, 3]. Predicted RGB values for rays.
-      disp_map: [batch_size]. Disparity map. Inverse of depth.
-      acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
-      extras: dict with everything returned by render_rays().
-    """
     if c2w is not None:
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
@@ -133,7 +117,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
     return ret_list + [ret_dict]
 
-
+# 渲染的路径
 def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
@@ -174,25 +158,32 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     return rgbs, disps
 
-
+# 创建一个Nerf MLP模型
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
+    # 对整体进行编码输入
+    # 这里i_embed表示的是位姿编码的方式
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
-
+    # 这里输入的channel view是什么->有点补洞，还是得看看论文
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
+
+    # 输出的channel是多少
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
+    # 创建Nerf网络输入，并将它放到GPU上
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+    # 这里是将model参数取出来
     grad_vars = list(model.parameters())
 
     model_fine = None
     if args.N_importance > 0:
+        # 这里是优化模型
         model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
                           input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
@@ -204,15 +195,19 @@ def create_nerf(args):
                                                                 netchunk=args.netchunk)
 
     # Create optimizer
+    # 创建优化器: adam优化器
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
     start = 0
+    # 初始地址
     basedir = args.basedir
+    # 这个是啥？
     expname = args.expname
 
     ##########################
 
     # Load checkpoints
+    # 读取检查点
     if args.ft_path is not None and args.ft_path!='None':
         ckpts = [args.ft_path]
     else:
@@ -258,20 +253,8 @@ def create_nerf(args):
 
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
-
+# 这里是什么意思？
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
-    """Transforms model's predictions to semantically meaningful values.
-    Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
-        z_vals: [num_rays, num_samples along ray]. Integration time.
-        rays_d: [num_rays, 3]. Direction of each ray.
-    Returns:
-        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-        disp_map: [num_rays]. Disparity map. Inverse of depth map.
-        acc_map: [num_rays]. Sum of weights along each ray.
-        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
-        depth_map: [num_rays]. Estimated distance to object.
-    """
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
     dists = z_vals[...,1:] - z_vals[...,:-1]
@@ -304,7 +287,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     return rgb_map, disp_map, acc_map, weights, depth_map
 
-
+# 渲染方程
 def render_rays(ray_batch,
                 network_fn,
                 network_query_fn,
@@ -318,36 +301,6 @@ def render_rays(ray_batch,
                 raw_noise_std=0.,
                 verbose=False,
                 pytest=False):
-    """Volumetric rendering.
-    Args:
-      ray_batch: array of shape [batch_size, ...]. All information necessary
-        for sampling along a ray, including: ray origin, ray direction, min
-        dist, max dist, and unit-magnitude viewing direction.
-      network_fn: function. Model for predicting RGB and density at each point
-        in space.
-      network_query_fn: function used for passing queries to network_fn.
-      N_samples: int. Number of different times to sample along each ray.
-      retraw: bool. If True, include model's raw, unprocessed predictions.
-      lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
-      perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
-        random points in time.
-      N_importance: int. Number of additional times to sample along each ray.
-        These samples are only passed to network_fine.
-      network_fine: "fine" network with same spec as network_fn.
-      white_bkgd: bool. If True, assume a white background.
-      raw_noise_std: ...
-      verbose: bool. If True, print more debugging info.
-    Returns:
-      rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
-      disp_map: [num_rays]. Disparity map. 1 / depth.
-      acc_map: [num_rays]. Accumulated opacity along each ray. Comes from fine model.
-      raw: [num_rays, num_samples, 4]. Raw predictions from model.
-      rgb0: See rgb_map. Output for coarse model.
-      disp0: See disp_map. Output for coarse model.
-      acc0: See acc_map. Output for coarse model.
-      z_std: [num_rays]. Standard deviation of distances along ray for each
-        sample.
-    """
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
@@ -417,47 +370,64 @@ def render_rays(ray_batch,
 
     return ret
 
-
+# 参数解析（通过参数解析了解输入和配置需要）
 def config_parser():
 
     import configargparse
     parser = configargparse.ArgumentParser()
+    # 配置文件的路径
     parser.add_argument('--config', is_config_file=True, 
                         help='config file path')
+    # 实验的名称（eg:blender_paper_lego）
     parser.add_argument("--expname", type=str, 
                         help='experiment name')
+    # 存放断点结果的文件夹（在这里默认是./logs/文件夹中），其中会存放模型的中间训练结果和一些日志输出
     parser.add_argument("--basedir", type=str, default='./logs/', 
                         help='where to store ckpts and logs')
+    # 这里是数据集存放的地址（在./data/llff/fern中）
     parser.add_argument("--datadir", type=str, default='./data/llff/fern', 
                         help='input data directory')
 
     # training options
+    # 训练配置选项，这里基本上可以对照着原文来看
+    # 首先是一个8层深的神经网络
     parser.add_argument("--netdepth", type=int, default=8, 
                         help='layers in network')
+    # 然后每层的输出是256个
     parser.add_argument("--netwidth", type=int, default=256, 
                         help='channels per layer')
+    # 这里是最后的优化网络8个
     parser.add_argument("--netdepth_fine", type=int, default=8, 
                         help='layers in fine network')
+    # 这里不知道是什么意思
     parser.add_argument("--netwidth_fine", type=int, default=256, 
                         help='channels per layer in fine network')
+    # 这里是小批量大小，看名字来说是每次迭代过程中渲染的光纤数量？
     parser.add_argument("--N_rand", type=int, default=32*32*4, 
                         help='batch size (number of random rays per gradient step)')
+    # 学习率（这里学习率特别小:5e-4）
     parser.add_argument("--lrate", type=float, default=5e-4, 
                         help='learning rate')
+    # 这里是延迟学习率（动手学深度学习里有，不要慌）
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
+    # 这里不知道是什么
     parser.add_argument("--chunk", type=int, default=1024*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
     parser.add_argument("--netchunk", type=int, default=1024*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
-    parser.add_argument("--no_batching", action='store_true', 
+    # 这里是在1张图像上随机渲染，不再采用一次渲染的方式
+    parser.add_argument("--no_batching", action='store_true',
                         help='only take random rays from 1 image at a time')
+    # 是否从中间的模型继续开始渲染？
     parser.add_argument("--no_reload", action='store_true', 
                         help='do not reload weights from saved ckpt')
+    # 这里应该是对有点云输入的情况进行操作->理解了之前看到的point-nerf里操作的含义
     parser.add_argument("--ft_path", type=str, default=None, 
                         help='specific weights npy file to reload for coarse network')
 
     # rendering options
+    # 渲染的配置还是用的上的，但是很多用的是默认参数
     parser.add_argument("--N_samples", type=int, default=64, 
                         help='number of coarse samples per ray')
     parser.add_argument("--N_importance", type=int, default=0,
@@ -466,6 +436,7 @@ def config_parser():
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
                         help='use full 5D input instead of 3D')
+    # 表示位姿编码进3D的方法，但为啥感觉里面用不到？只是用-1来判断.
     parser.add_argument("--i_embed", type=int, default=0, 
                         help='set 0 for default positional encoding, -1 for none')
     parser.add_argument("--multires", type=int, default=10, 
@@ -483,18 +454,21 @@ def config_parser():
                         help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
 
     # training options
+    # 这里不知道什么意思
     parser.add_argument("--precrop_iters", type=int, default=0,
                         help='number of steps to train on central crops')
     parser.add_argument("--precrop_frac", type=float,
                         default=.5, help='fraction of img taken for central crops') 
 
     # dataset options
+    # 使用的数据集
     parser.add_argument("--dataset_type", type=str, default='llff', 
                         help='options: llff / blender / deepvoxels')
     parser.add_argument("--testskip", type=int, default=8, 
                         help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
 
     ## deepvoxels flags
+    # 这里应该是训练deepvoxel做对比的时候才用，暂时这么记录，后面再看
     parser.add_argument("--shape", type=str, default='greek', 
                         help='options : armchair / cube / greek / vase')
 
@@ -517,32 +491,44 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
+    # 这里是将训练的结果以一定的频率输出屏幕的情况->在训练中的确看到输出的LOSS和PSNR值
     parser.add_argument("--i_print",   type=int, default=100, 
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=500, 
+    # 这里用在tensorboard中，但是不知道tensorboard有啥用
+    parser.add_argument("--i_img",     type=int, default=500,
                         help='frequency of tensorboard image logging')
+    # 这里是将权重结果按一定的频率保存下来
     parser.add_argument("--i_weights", type=int, default=10000, 
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=50000, 
+    # 这里是将test的结果保存下来
+    parser.add_argument("--i_testset", type=int, default=50000,
                         help='frequency of testset saving')
+    # 这里是将用位姿渲染出来的视频结果给保存下来
     parser.add_argument("--i_video",   type=int, default=50000, 
                         help='frequency of render_poses video saving')
 
     return parser
 
 
+# 训练函数入口
 def train():
 
+    # 首先解析参数
     parser = config_parser()
     args = parser.parse_args()
 
     # Load data
     K = None
+    # 如果数据类型是llff类型，该怎么训练
     if args.dataset_type == 'llff':
+        # 这里看有以下几个读取输入：
+        # 图像、位姿、bds（不知道是什么）, 渲染位姿，i_test应该是测试数据
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
+        # 这里是通过poses_bounds.npy，但是看不到里面具体内容是什么？
         hwf = poses[0,:3,-1]
+
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
         if not isinstance(i_test, list):
@@ -555,17 +541,20 @@ def train():
         i_val = i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
                         (i not in i_test and i not in i_val)])
-
+        # 表示渲染的区域.
         print('DEFINING BOUNDS')
+        # 如果没有ndc这个渲染方式
         if args.no_ndc:
+            # near就0.9->1.0
             near = np.ndarray.min(bds) * .9
             far = np.ndarray.max(bds) * 1.
-            
         else:
+            # 当有ndc时候的确就不一样
+            # 是0.->1.0才是
             near = 0.
             far = 1.
         print('NEAR FAR', near, far)
-
+    # 如果数据类型是blender的类型，该怎么训练
     elif args.dataset_type == 'blender':
         images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
@@ -578,7 +567,7 @@ def train():
             images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
         else:
             images = images[...,:3]
-
+    # 如果是LINEMOD，应该怎么训练
     elif args.dataset_type == 'LINEMOD':
         images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(args.datadir, args.half_res, args.testskip)
         print(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
@@ -589,7 +578,7 @@ def train():
             images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
         else:
             images = images[...,:3]
-
+    # 如果是DeepVoxel应该怎么训练
     elif args.dataset_type == 'deepvoxels':
 
         images, poses, render_poses, hwf, i_split = load_dv_data(scene=args.shape,
@@ -602,16 +591,20 @@ def train():
         hemi_R = np.mean(np.linalg.norm(poses[:,:3,-1], axis=-1))
         near = hemi_R-1.
         far = hemi_R+1.
-
+    # 如果不知道训练数据集是什么类型
     else:
+        # 直接不训练了，退出😂
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return
 
     # Cast intrinsics to right types
+    # 这里几个参数：H是图像高，W是图像宽，focal是光心位置
     H, W, focal = hwf
     H, W = int(H), int(W)
     hwf = [H, W, focal]
 
+    # 如果没有内参的话，就生成一个.
+    # 看十四讲来理解不难
     if K is None:
         K = np.array([
             [focal, 0, 0.5*W],
@@ -637,6 +630,7 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
+    # 创建Nerf模型
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
     global_step = start
 
@@ -644,10 +638,12 @@ def train():
         'near' : near,
         'far' : far,
     }
+    # 这里是干嘛
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
 
     # Move testing data to GPU
+    # 将测试数据移动到GPU中
     render_poses = torch.Tensor(render_poses).to(device)
 
     # Short circuit if only rendering out from trained model
@@ -698,43 +694,46 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
+    # 总体训练迭代次数
     N_iters = 200000 + 1
+    # 开始训练
     print('Begin')
+    # 训练的视角
     print('TRAIN views are', i_train)
+    # 测试的视角
     print('TEST views are', i_test)
+    # 这个Val不知道是啥
     print('VAL views are', i_val)
-
-    # Summary writers
-    # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
     
     start = start + 1
+    # 这里trange是什么？
     for i in trange(start, N_iters):
         time0 = time.time()
 
         # Sample random ray batch
+        # 这里用射线批量化来渲染
         if use_batching:
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
+            # 离散化反向渲染处的图片
             batch_rays, target_s = batch[:2], batch[2]
 
             i_batch += N_rand
             if i_batch >= rays_rgb.shape[0]:
+                # 每次后开始随机渲染，打乱渲染顺序
                 print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
-
         else:
             # Random from one image
             img_i = np.random.choice(i_train)
             target = images[img_i]
             target = torch.Tensor(target).to(device)
             pose = poses[img_i, :3,:4]
-
             if N_rand is not None:
                 rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
-
                 if i < args.precrop_iters:
                     dH = int(H//2 * args.precrop_frac)
                     dW = int(W//2 * args.precrop_frac)
@@ -757,14 +756,17 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
+        # 开始优化循环
+        # 这里渲染出来rgb，disp（视差？）， acc，extras（后面这两是啥？）
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
-
+        # 梯度清零
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
         trans = extras['raw'][...,-1]
         loss = img_loss
+        # 这里应该是用来做psnr指标
         psnr = mse2psnr(img_loss)
 
         if 'rgb0' in extras:
@@ -777,6 +779,7 @@ def train():
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
+        # 这里应该是深度学习的学习率变化.
         decay_rate = 0.1
         decay_steps = args.lrate_decay * 1000
         new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
@@ -808,13 +811,6 @@ def train():
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
 
-            # if args.use_viewdirs:
-            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
-            #     with torch.no_grad():
-            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            #     render_kwargs_test['c2w_staticcam'] = None
-            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
-
         if i%args.i_testset==0 and i > 0:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
@@ -827,52 +823,13 @@ def train():
     
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
-        """
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
-            print('iter time {:.05f}'.format(dt))
-
-            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
-                tf.contrib.summary.scalar('loss', loss)
-                tf.contrib.summary.scalar('psnr', psnr)
-                tf.contrib.summary.histogram('tran', trans)
-                if args.N_importance > 0:
-                    tf.contrib.summary.scalar('psnr0', psnr0)
-
-
-            if i%args.i_img==0:
-
-                # Log a rendered validation view to Tensorboard
-                img_i=np.random.choice(i_val)
-                target = images[img_i]
-                pose = poses[img_i, :3,:4]
-                with torch.no_grad():
-                    rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
-                                                        **render_kwargs_test)
-
-                psnr = mse2psnr(img2mse(rgb, target))
-
-                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-
-                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
-                    tf.contrib.summary.image('disp', disp[tf.newaxis,...,tf.newaxis])
-                    tf.contrib.summary.image('acc', acc[tf.newaxis,...,tf.newaxis])
-
-                    tf.contrib.summary.scalar('psnr_holdout', psnr)
-                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
-
-
-                if args.N_importance > 0:
-
-                    with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-                        tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
-                        tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
-                        tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
-        """
 
         global_step += 1
 
 
+# 这里是整体程序入口，在这里开始启动
 if __name__=='__main__':
+    # 设置torch中默认的浮点数类型，这里的浮点数类型设置的是GPU版本的32位浮点数
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
-
+    # 开始训练
     train()

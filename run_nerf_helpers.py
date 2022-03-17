@@ -6,12 +6,15 @@ import numpy as np
 
 
 # Misc
+# 度量尺度
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
+# 这个是计算PSNR指标的度量方式
 mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
 
 
 # Positional encoding (section 5.1)
+# 5.1当中说的位姿编码
 class Embedder:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -69,13 +72,16 @@ class NeRF(nn.Module):
         """ 
         """
         super(NeRF, self).__init__()
+        # 这里应该是网络的深度（8层）
         self.D = D
+        # 这个是网络的宽度（256）
         self.W = W
         self.input_ch = input_ch
         self.input_ch_views = input_ch_views
         self.skips = skips
         self.use_viewdirs = use_viewdirs
-        
+        # nn.ModuleLists不知道是什么
+        # ModuleLists就相当于把这个转换为module（具体的后面再看）
         self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
         
@@ -87,12 +93,15 @@ class NeRF(nn.Module):
         #     [nn.Linear(input_ch_views + W, W//2)] + [nn.Linear(W//2, W//2) for i in range(D//2)])
         
         if use_viewdirs:
+            # 特征层（想把这里的W给打印出来）
             self.feature_linear = nn.Linear(W, W)
             self.alpha_linear = nn.Linear(W, 1)
             self.rgb_linear = nn.Linear(W//2, 3)
         else:
+            # 输出层
             self.output_linear = nn.Linear(W, output_ch)
 
+    # 一次前向计算
     def forward(self, x):
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
         h = input_pts
@@ -118,6 +127,7 @@ class NeRF(nn.Module):
 
         return outputs    
 
+    # 为什么用keras来加载权重？没想通
     def load_weights_from_keras(self, weights):
         assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
         
