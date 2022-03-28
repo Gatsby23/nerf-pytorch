@@ -72,12 +72,15 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     return all_ret
 
 # 渲染方程
+# chunk表示的是渲染的分辨率吗？
 def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
     if c2w is not None:
+        # 特殊情况去渲染整个图像
         # special case to render full image
+        # rays_o和rays_d有什么区别呢？
         rays_o, rays_d = get_rays(H, W, K, c2w)
     else:
         # use provided ray batch
@@ -93,6 +96,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
         viewdirs = torch.reshape(viewdirs, [-1,3]).float()
 
     sh = rays_d.shape # [..., 3]
+    # 这里是NDC光栅化
     if ndc:
         # for forward facing scenes
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
@@ -253,7 +257,7 @@ def create_nerf(args):
 
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
-# 这里是什么意思？
+# 这里应该是对原始图像进行操作，增加噪声？
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
@@ -522,11 +526,13 @@ def train():
     # 如果数据类型是llff类型，该怎么训练
     if args.dataset_type == 'llff':
         # 这里看有以下几个读取输入：
-        # 图像、位姿、bds（不知道是什么）, 渲染位姿，i_test应该是测试数据
+        # 图像、位姿、boundarys, 渲染位姿，i_test应该是测试数据
+        # 这里对bds特别说明是边界，用于说明描述3D渲染物体的空间边界处（比方说是-1,1的立方体）
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
         # 这里是通过poses_bounds.npy，但是看不到里面具体内容是什么？
+        # 这里的hwf分别代表是height, width和focal.
         hwf = poses[0,:3,-1]
 
         poses = poses[:,:3,:4]
@@ -545,7 +551,6 @@ def train():
         print('DEFINING BOUNDS')
         # 如果没有ndc这个渲染方式
         if args.no_ndc:
-            # near就0.9->1.0
             near = np.ndarray.min(bds) * .9
             far = np.ndarray.max(bds) * 1.
         else:
@@ -647,6 +652,7 @@ def train():
     render_poses = torch.Tensor(render_poses).to(device)
 
     # Short circuit if only rendering out from trained model
+    # 这里相当于测试：只是用来渲染，不做训练
     if args.render_only:
         print('RENDER ONLY')
         with torch.no_grad():
@@ -757,24 +763,32 @@ def train():
 
         #####  Core optimization loop  #####
         # 开始优化循环
-        # 这里渲染出来rgb，disp（视差？）， acc，extras（后面这两是啥？）
+        # 这里渲染出来rgb
+        # disp（视差？）， acc，extras（后面这两是啥？）
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
         # 梯度清零
         optimizer.zero_grad()
+        # rgb是渲染出来的，target_s是ground_truth
+        # 这里第一个是论文中对应的像素差做为loss。
+        # 这里的rgb事coarse value
         img_loss = img2mse(rgb, target_s)
         trans = extras['raw'][...,-1]
         loss = img_loss
         # 这里应该是用来做psnr指标
+        # 第二个也是提到的Loss，论文得再仔细看下
         psnr = mse2psnr(img_loss)
 
         if 'rgb0' in extras:
+            # 第二个也是像素的差直接做loss。这里是fine value.
             img_loss0 = img2mse(extras['rgb0'], target_s)
             loss = loss + img_loss0
             psnr0 = mse2psnr(img_loss0)
 
+        # 求梯度
         loss.backward()
+        # 计算一次前向
         optimizer.step()
 
         # NOTE: IMPORTANT!
