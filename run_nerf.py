@@ -40,28 +40,33 @@ def batchify(fn, chunk):
     return ret
 
 # 开始跑神经网络
+# 这里不知道对应的netchunk是干嘛的，有什么用
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
+    # 这一个是视角的处理，但是真的没看懂
     if viewdirs is not None:
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
+    # 这里应该是分块去得到射线的结果
     outputs_flat = batchify(fn, netchunk)(embedded)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
-
+# 批量的射线尽量.
 def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
+    # 需要注意的是：这里需要用小批量射线来渲染，从而避免内存泄露.
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
+        # 射线渲染.
         ret = render_rays(rays_flat[i:i+chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
@@ -71,27 +76,27 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
     return all_ret
 
-# 渲染方程
-# chunk表示的是渲染的分辨率吗？
+# 渲染过程（其中rays是批量射线）
 def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
     if c2w is not None:
-        # 特殊情况去渲染整个图像
+        # 这里是特殊case的处理：当没有c2w的时候，则从图像中发射出射线来进行渲染.
         # special case to render full image
-        # rays_o和rays_d有什么区别呢？
         rays_o, rays_d = get_rays(H, W, K, c2w)
     else:
         # use provided ray batch
         rays_o, rays_d = rays
 
+    # 当使用方向（精细化的情况）
     if use_viewdirs:
         # provide ray directions as input
         viewdirs = rays_d
         if c2w_staticcam is not None:
             # special case to visualize effect of viewdirs
             rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
+        # 归一化
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
         viewdirs = torch.reshape(viewdirs, [-1,3]).float()
 
@@ -99,18 +104,22 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     # 这里是NDC光栅化
     if ndc:
         # for forward facing scenes
+        # 这里是前向渲染，得到对应的rays_o和rays_d.
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
 
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
 
+    # 沿着光线射线方向进行采样，分别得到对应的一段段volume所包含的near和far的值.
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
     rays = torch.cat([rays_o, rays_d, near, far], -1)
+    # 如果使用viewing direction。则将viewdirs连接到最后
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
+    # 渲染得到所有的结果->会将结果分成三个：rgb，disp和acc.
     all_ret = batchify_rays(rays, chunk, **kwargs)
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
@@ -121,11 +130,12 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
     return ret_list + [ret_dict]
 
-# 渲染的路径
+# 渲染接口
 def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
 
+    # 这里是渲染哪个像素
     if render_factor!=0:
         # Render downsampled for speed
         H = H//render_factor
@@ -162,23 +172,28 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     return rgbs, disps
 
-# 创建一个Nerf MLP模型
+# 创建NERF模型:
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
     # 对整体进行编码输入
     # 这里i_embed表示的是位姿编码的方式
+    # 这里的embed_fn是什么？input_ch感觉像input channel【从输出看是的，输出的维度】
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
     # 这里输入的channel view是什么->有点补洞，还是得看看论文
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
+        # 这里感觉是试用视角，但为什么又要生成一次？
+        # embeddirs_fn和embed_fn的区别在什么地方？
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
 
-    # 输出的channel是多少
+    # 如果要输出精细化模型的话，这里的输出维度为5。
     output_ch = 5 if args.N_importance > 0 else 4
+    # 这里skips 4 是指加入的位置编码的位置.
     skips = [4]
-    # 创建Nerf网络输入，并将它放到GPU上
+    # 创建Coarse对应Nerf训练网络
+    # 这里没有用到位置编码，应该是直接train就可以了
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
@@ -187,19 +202,20 @@ def create_nerf(args):
 
     model_fine = None
     if args.N_importance > 0:
-        # 这里是优化模型
+        # 创建Fine对应的训练网络
         model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
                           input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
         grad_vars += list(model_fine.parameters())
-
+    # 到这里相当于把NERF的两个模型都创建完成->NERF的COARSE模型和NERF的FINE模型
+    # 这里是net_work查询得到的精细化模型？
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                 embed_fn=embed_fn,
                                                                 embeddirs_fn=embeddirs_fn,
                                                                 netchunk=args.netchunk)
 
     # Create optimizer
-    # 创建优化器: adam优化器
+    # 创建优化器: adam优化器->这里用的基本上都是这些模拟退火算法
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
     start = 0
@@ -245,6 +261,7 @@ def create_nerf(args):
         'raw_noise_std' : args.raw_noise_std,
     }
 
+    # NDC仅仅对LLFF这种格式的数据有用
     # NDC only good for LLFF-style forward facing data
     if args.dataset_type != 'llff' or args.no_ndc:
         print('Not ndc!')
@@ -257,7 +274,7 @@ def create_nerf(args):
 
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
-# 这里应该是对原始图像进行操作，增加噪声？
+# 这里是对原始图像添加噪声（可以增强训练效果？）
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
@@ -291,7 +308,9 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     return rgb_map, disp_map, acc_map, weights, depth_map
 
-# 渲染方程
+# 批量射线渲染方程
+# 这里的network_fn就是NERF里的Coarse Model.
+# 这里的network_query_fn就是model_fine.
 def render_rays(ray_batch,
                 network_fn,
                 network_query_fn,
@@ -319,6 +338,7 @@ def render_rays(ray_batch,
 
     z_vals = z_vals.expand([N_rays, N_samples])
 
+    # 这里的perturb是不是插值？还得到中间的射线结果？
     if perturb > 0.:
         # get intervals between samples
         mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
@@ -328,6 +348,7 @@ def render_rays(ray_batch,
         t_rand = torch.rand(z_vals.shape)
 
         # Pytest, overwrite u with numpy's fixed random numbers
+        # 这里的测试方法的确值得看下
         if pytest:
             np.random.seed(0)
             t_rand = np.random.rand(*list(z_vals.shape))
@@ -337,8 +358,7 @@ def render_rays(ray_batch,
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-
-#     raw = run_network(pts)
+    # 这里得到精细化结果
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
@@ -347,16 +367,19 @@ def render_rays(ray_batch,
         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
 
         z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        # 这里是5.2节，生成分层模型.
         z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
         z_samples = z_samples.detach()
 
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
 
+        # 这里是依据之前获得的network再训练去跑精细化对比训练
         run_fn = network_fn if network_fine is None else network_fine
 #         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
+        # 得到最后的rgb、disp、acc图像.
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
@@ -440,11 +463,13 @@ def config_parser():
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
                         help='use full 5D input instead of 3D')
-    # 表示位姿编码进3D的方法，但为啥感觉里面用不到？只是用-1来判断.
+    # 
     parser.add_argument("--i_embed", type=int, default=0, 
                         help='set 0 for default positional encoding, -1 for none')
+    # 这里是多个分辨率
     parser.add_argument("--multires", type=int, default=10, 
                         help='log2 of max freq for positional encoding (3D location)')
+    # 这里是多个视角
     parser.add_argument("--multires_views", type=int, default=4, 
                         help='log2 of max freq for positional encoding (2D direction)')
     parser.add_argument("--raw_noise_std", type=float, default=0., 
@@ -609,7 +634,6 @@ def train():
     hwf = [H, W, focal]
 
     # 如果没有内参的话，就生成一个.
-    # 看十四讲来理解不难
     if K is None:
         K = np.array([
             [focal, 0, 0.5*W],
@@ -617,10 +641,12 @@ def train():
             [0, 0, 1]
         ])
 
+    # 如果是为了渲染测试（只看渲染结果）：将需要测试的pose给保存下来，用对应的pose去渲染
     if args.render_test:
         render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
+    # 创建一个日志文件夹并拷贝其中的配置文件
     basedir = args.basedir
     expname = args.expname
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
@@ -635,7 +661,7 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
-    # 创建Nerf模型
+    # 创建NERF模型->这里得到的是NERF训练过程中用到的参数
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
     global_step = start
 
@@ -643,16 +669,16 @@ def train():
         'near' : near,
         'far' : far,
     }
-    # 这里是干嘛
+    # 训练和测试过程中需要加载的东西
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
 
     # Move testing data to GPU
-    # 将测试数据移动到GPU中
+    # 将渲染所需要的Pose加载到GPU设备中去
     render_poses = torch.Tensor(render_poses).to(device)
 
     # Short circuit if only rendering out from trained model
-    # 这里相当于测试：只是用来渲染，不做训练
+    # 这里只是测试过程：观察得到的渲染结果
     if args.render_only:
         print('RENDER ONLY')
         with torch.no_grad():
@@ -666,7 +692,7 @@ def train():
             testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
-
+            # 这里是渲染得到结果
             rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
             print('Done rendering', testsavedir)
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
@@ -674,11 +700,13 @@ def train():
             return
 
     # Prepare raybatch tensor if batching random rays
+    # 批量射线？
     N_rand = args.N_rand
     use_batching = not args.no_batching
     if use_batching:
         # For random ray batching
         print('get rays')
+        # 这里是生成射线
         rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
         print('done, concats')
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
@@ -764,11 +792,10 @@ def train():
         #####  Core optimization loop  #####
         # 开始优化循环
         # 这里渲染出来rgb
-        # disp（视差？）， acc，extras（后面这两是啥？）
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
-        # 梯度清零
+        # 梯度清零->这里是指标评测了应该
         optimizer.zero_grad()
         # rgb是渲染出来的，target_s是ground_truth
         # 这里第一个是论文中对应的像素差做为loss。
@@ -795,17 +822,20 @@ def train():
         ###   update learning rate   ###
         # 这里应该是深度学习的学习率变化.
         decay_rate = 0.1
+        # 到后面学习率的变化来优化
         decay_steps = args.lrate_decay * 1000
         new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
         for param_group in optimizer.param_groups:
             param_group['lr'] = new_lrate
         ################################
 
+        # 这里是计算时间开销
         dt = time.time()-time0
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 
         # Rest is logging
+        # 这里是记录时间
         if i%args.i_weights==0:
             path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
             torch.save({
@@ -816,6 +846,7 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
+        # 这里是生成Video
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
@@ -829,6 +860,7 @@ def train():
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
+            #
             with torch.no_grad():
                 render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')

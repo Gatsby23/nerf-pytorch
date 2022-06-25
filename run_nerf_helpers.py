@@ -19,7 +19,8 @@ class Embedder:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.create_embedding_fn()
-        
+
+    # 创建编码层？
     def create_embedding_fn(self):
         embed_fns = []
         d = self.kwargs['input_dims']
@@ -40,14 +41,14 @@ class Embedder:
             for p_fn in self.kwargs['periodic_fns']:
                 embed_fns.append(lambda x, p_fn=p_fn, freq=freq : p_fn(x * freq))
                 out_dim += d
-                    
+        # 这里应该是用不用位置编码
         self.embed_fns = embed_fns
         self.out_dim = out_dim
         
     def embed(self, inputs):
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
-
+# 这里是得到每层的embedding参数
 def get_embedder(multires, i=0):
     if i == -1:
         return nn.Identity(), 3
@@ -60,13 +61,17 @@ def get_embedder(multires, i=0):
                 'log_sampling' : True,
                 'periodic_fns' : [torch.sin, torch.cos],
     }
-    
+
+    # 利用embed_kwargs来创建编码选项
     embedder_obj = Embedder(**embed_kwargs)
+    # 利用编码选项来创建位置编码
     embed = lambda x, eo=embedder_obj : eo.embed(x)
+    # 这里是输出的维度.
     return embed, embedder_obj.out_dim
 
 
 # Model
+# 这里是待创建的Nerf模型
 class NeRF(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
         """ 
@@ -76,21 +81,22 @@ class NeRF(nn.Module):
         self.D = D
         # 这个是网络的宽度（256）
         self.W = W
+        # 这个应该是输入的维度
         self.input_ch = input_ch
+        # 这里应该是视角
         self.input_ch_views = input_ch_views
+        # 这里应该是跨几层来加
         self.skips = skips
+        # 这里是判断是否用视角
         self.use_viewdirs = use_viewdirs
-        # nn.ModuleLists不知道是什么
-        # ModuleLists就相当于把这个转换为module（具体的后面再看）
+        # 这里应该是创建的模块
+        # 这里是NERF的粗模块：前8层，在第5层的时候需要加上位置的编码，所以需要W+input_ch
         self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
         
         ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
+        # 这里应该是最后一层（加上视角的）
         self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
-
-        ### Implementation according to the paper
-        # self.views_linears = nn.ModuleList(
-        #     [nn.Linear(input_ch_views + W, W//2)] + [nn.Linear(W//2, W//2) for i in range(D//2)])
         
         if use_viewdirs:
             # 特征层（想把这里的W给打印出来）
@@ -98,7 +104,7 @@ class NeRF(nn.Module):
             self.alpha_linear = nn.Linear(W, 1)
             self.rgb_linear = nn.Linear(W//2, 3)
         else:
-            # 输出层
+            # 输出层->4个通道，三个是颜色，一个是σ
             self.output_linear = nn.Linear(W, output_ch)
 
     # 一次前向计算
@@ -127,7 +133,7 @@ class NeRF(nn.Module):
 
         return outputs    
 
-    # 为什么用keras来加载权重？没想通
+    # 这里是加载训练网络结果的权重
     def load_weights_from_keras(self, weights):
         assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
         
@@ -160,19 +166,20 @@ class NeRF(nn.Module):
 
 
 # Ray helpers
+# 这里是从图像中反向射出射线
 def get_rays(H, W, K, c2w):
-    # meshgrid表示什么意思呢？
+    # 这里是对图像生成对应的坐标【比方说640x480图像，生成一个640x480的坐标，然后得到每个方向上的坐标索引值】
     i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
     i = i.t()
     j = j.t()
-    # 这个是什么意思？
-    # 看公式像反向投影
+    # 通过坐标索引值，反向生成方向
     dirs = torch.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], -1)
     # Rotate ray directions from camera frame to the world frame
     # 这里感觉是生成多种不同的方式，不同的射线吗？
     # 这里的dirs表示的是不同的方向？
     rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    # 这里得到了射线起点位置ro位置.
     rays_o = c2w[:3,-1].expand(rays_d.shape)
     return rays_o, rays_d
 
@@ -208,10 +215,15 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
 
 
 # Hierarchical sampling (section 5.2)
+# 这里是NERF已经通过COARSE网络模型得到一组权重参数，然后作者通过分层采样先得到Nc个点？
+# 通过对权重归一化，得到分段常数概率密度函数，然后通过逆变换采样得到新的N_f个点.
+# 这N_f个点会对颜色的生成更还有意义
 def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     # Get pdf
-    weights = weights + 1e-5 # prevent nans
+    weights = weights + 1e-5 # 添加小量来避免除法导致的NAN问题
+    # 先进行权重归一化操作
     pdf = weights / torch.sum(weights, -1, keepdim=True)
+    # 将量进行相加
     cdf = torch.cumsum(pdf, -1)
     cdf = torch.cat([torch.zeros_like(cdf[...,:1]), cdf], -1)  # (batch, len(bins))
 
@@ -233,7 +245,7 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
             u = np.random.rand(*new_shape)
         u = torch.Tensor(u)
 
-    # Invert CDF
+    # Invert CDF（这里的具体公式没有看懂）
     u = u.contiguous()
     inds = torch.searchsorted(cdf, u, right=True)
     below = torch.max(torch.zeros_like(inds-1), inds-1)
